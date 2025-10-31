@@ -53,5 +53,7 @@ dkms.conf
 
 polyagamma.egg-info
 polyagamma/*.c
+polyagamma/_version.py
 .python-version
 __pycache__
+test_minimal.py
