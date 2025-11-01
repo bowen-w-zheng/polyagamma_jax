@@ -118,7 +118,7 @@ def create_comparison_plot(method_name, method_config, z_values, h, n_samples, s
         axes = axes.reshape(1, -1)
     axes_flat = axes.flatten()
 
-    # First pass: collect all samples and compute global x-range
+    # Collect all samples
     all_c_samples = []
     all_jax_samples = []
 
@@ -144,17 +144,7 @@ def create_comparison_plot(method_name, method_config, z_values, h, n_samples, s
         print(f"  C-backend ({c_method_str}) - Mean: {c_samples.mean():.6f}, Std: {c_samples.std():.6f}")
         print(f"  JAX ({method_name})       - Mean: {jax_samples.mean():.6f}, Std: {jax_samples.std():.6f}")
 
-    # Compute global x-range for aligned axes
-    global_min = min(np.min(c) for c in all_c_samples)
-    global_max = max(np.max(c) for c in all_c_samples)
-    global_min = min(global_min, min(np.min(j) for j in all_jax_samples))
-    global_max = max(global_max, max(np.max(j) for j in all_jax_samples))
-    margin = (global_max - global_min) * 0.05
-    x_range = (global_min - margin, global_max + margin)
-
-    print(f"\nGlobal x-range: [{x_range[0]:.4f}, {x_range[1]:.4f}]")
-
-    # Second pass: create plots with aligned x-axis
+    # Create plots with individual x-axis for each subplot
     for idx, z in enumerate(z_values):
         ax = axes_flat[idx]
         c_samples = all_c_samples[idx]
@@ -166,7 +156,13 @@ def create_comparison_plot(method_name, method_config, z_values, h, n_samples, s
         jax_mean = jax_samples.mean()
         jax_std = jax_samples.std()
 
-        # Create histogram with common bins
+        # Compute individual x-range for this z value
+        min_val = min(np.min(c_samples), np.min(jax_samples))
+        max_val = max(np.max(c_samples), np.max(jax_samples))
+        margin = (max_val - min_val) * 0.05
+        x_range = (min_val - margin, max_val + margin)
+
+        # Create histogram with bins specific to this data
         bins = np.linspace(x_range[0], x_range[1], 50)
 
         c_label = f'C-backend ({c_method_str})'
@@ -175,7 +171,7 @@ def create_comparison_plot(method_name, method_config, z_values, h, n_samples, s
         ax.hist(jax_samples, bins=bins, alpha=0.5, label=f'JAX ({method_name})',
                 color='red', density=True, edgecolor='black', linewidth=0.5)
 
-        # Set common x-axis range
+        # Set individual x-axis range for this subplot
         ax.set_xlim(x_range)
 
         # Add labels and title
