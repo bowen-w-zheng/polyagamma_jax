@@ -64,12 +64,16 @@ def _sample_c_backend(h: float, z: float, n_samples: int) -> Tuple[np.ndarray, f
 def _create_batch_sampler(single_sampler: SingleSampler, h: float):
     """Create a batch sampler from a single sampler function.
 
+    The returned batch sampler accepts z_array as a traced argument to avoid
+    recompilation when z values change (as long as shape and dtype remain constant).
+    h is fixed at creation time since it's used in control flow within the samplers.
+
     Parameters
     ----------
     single_sampler : callable
         Single sample function with signature (key, h, z) -> sample
     h : float
-        Shape parameter
+        Shape parameter (fixed at JIT compile time)
 
     Returns
     -------
@@ -98,14 +102,16 @@ def _sample_jax_method(
     """Collect ``n_samples`` draws for ``single_sampler`` and elapsed seconds.
 
     Uses efficient batch sampling by creating an array of identical z values
-    and using vectorized sampling.
+    and using vectorized sampling. The batch sampler is created once and reused
+    across warmup and timed runs to avoid recompilation.
     """
-    # Create batch sampler for this method
+    # Create batch sampler for this method (only once)
+    # h is fixed at creation time, z_array is traced to avoid recompilation
     batch_sampler = _create_batch_sampler(single_sampler, h)
 
     # Create arrays for batch sampling
     key = jax.random.PRNGKey(seed)
-    z_array = jnp.full(n_samples, z)
+    z_array = jnp.full(n_samples, z, dtype=jnp.float64)
 
     # Warmup: Run multiple times to ensure JIT compilation is complete
     warmup_size = min(500, n_samples)
@@ -181,6 +187,18 @@ def compare_methods(
         print(header)
         print("-" * 100)
 
+        # Create batch sampler once for this method and reuse across all z values
+        # h is fixed at creation time, only z values change (avoiding recompilation)
+        batch_sampler = _create_batch_sampler(sampler, h)
+
+        # Perform initial warmup with first z value to trigger compilation
+        first_z = list(z_values)[0]
+        warmup_key = jax.random.PRNGKey(42)
+        warmup_size = min(500, n_samples)
+        z_warmup = jnp.full(warmup_size, first_z, dtype=jnp.float64)
+        for _ in range(3):
+            batch_sampler(warmup_key, z_warmup).block_until_ready()
+
         for idx, z in enumerate(z_values):
             # Sample from C backend
             c_samples, c_elapsed = _sample_c_backend(h, z, n_samples)
@@ -188,10 +206,25 @@ def compare_methods(
             c_var = c_samples.var()
             c_time_ms = c_elapsed * 1000
 
-            # Sample from JAX implementation
-            jax_samples, jax_elapsed = _sample_jax_method(
-                sampler, h, z, n_samples, seed=idx + 42
-            )
+            # Sample from JAX implementation using pre-created batch sampler
+            z_array = jnp.full(n_samples, z, dtype=jnp.float64)
+
+            # Timed sampling - run multiple iterations and take the best time
+            n_iterations = 5
+            times = []
+            all_samples = None
+            for i in range(n_iterations):
+                key_i = jax.random.PRNGKey(idx + 42 + i)
+                start = time.perf_counter()
+                samples = batch_sampler(key_i, z_array)
+                samples.block_until_ready()
+                elapsed = time.perf_counter() - start
+                times.append(elapsed)
+                if i == 0:
+                    all_samples = samples
+
+            jax_elapsed = min(times)
+            jax_samples = np.asarray(all_samples)
             jax_mean = jax_samples.mean()
             jax_var = jax_samples.var()
             jax_time_ms = jax_elapsed * 1000
