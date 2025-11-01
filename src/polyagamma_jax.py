@@ -1153,13 +1153,101 @@ def sample_pg_single(key, h, z):
 # Public API
 # ==============================================================================
 
+def create_pg_sampler(h=1.0, batch_size=None, method='hybrid', warmup=True):
+    """
+    Create a pre-compiled and optionally pre-warmed Polya-Gamma sampler.
+
+    This function creates a batch sampler that avoids recompilation when z values
+    change. The sampler is JIT-compiled and optionally warmed up with the specified
+    batch size, ensuring optimal performance for iterative algorithms like MCMC.
+
+    Parameters
+    ----------
+    h : float, optional
+        Shape parameter (default: 1.0). Fixed at compilation time.
+    batch_size : int, optional
+        Number of samples per batch. If provided and warmup=True, the sampler
+        will be pre-warmed for this exact size (default: None).
+    method : str, optional
+        Sampling method (default: 'hybrid'):
+        - 'saddle': Recommended for most uses. Excellent speed/accuracy balance.
+        - 'hybrid': Automatically selects between devroye and saddle based on (h, z).
+        - 'devroye': Direct implementation of Devroye (2009) algorithm.
+        - 'normal': Normal approximation, faster but less accurate for small z.
+    warmup : bool, optional
+        Whether to perform warmup compilation (default: True). Warmup ensures
+        the first call is fast. Only applies if batch_size is provided.
+
+    Returns
+    -------
+    callable
+        A JIT-compiled sampler function with signature (key, z_array) -> samples.
+        The z_array must have the same shape and dtype as the warmup size for
+        optimal performance (no recompilation).
+
+    Examples
+    --------
+    >>> # Create a pre-warmed sampler for MCMC with 1000 samples
+    >>> sampler = create_pg_sampler(h=1.0, batch_size=1000)
+    >>>
+    >>> # Use it in an MCMC loop - no recompilation when z changes!
+    >>> for iteration in range(100):
+    ...     z = compute_new_z()  # Your MCMC update
+    ...     z_array = jnp.full(1000, z)
+    ...     samples = sampler(key, z_array)  # Fast!
+    >>>
+    >>> # Can also create without warmup and specify size later
+    >>> sampler = create_pg_sampler(h=1.0, warmup=False)
+    >>> samples = sampler(key, jnp.full(500, 2.0))  # First call compiles
+
+    Notes
+    -----
+    - Changing h requires creating a new sampler
+    - Changing batch_size triggers recompilation (create new sampler instead)
+    - Changing only z values (same size/dtype) reuses the compiled code
+    """
+    # Select the sampling method
+    if method == 'hybrid':
+        single_sampler = sample_pg_single
+    elif method == 'devroye':
+        single_sampler = sample_pg_devroye_single
+    elif method == 'saddle':
+        single_sampler = sample_pg_saddle_single
+    elif method == 'normal':
+        single_sampler = sample_pg_normal_single
+    else:
+        raise ValueError(f"Unknown method: {method}. Use 'hybrid', 'devroye', 'saddle', or 'normal'.")
+
+    # Create JIT-compiled batch sampler
+    @jax.jit
+    def batch_sampler(key, z_array):
+        """Sample from PG(h, z) for a batch of z values."""
+        z_array = jnp.asarray(z_array, dtype=jnp.float64)
+        n = z_array.shape[0]
+        keys = random.split(key, n)
+        sample_fn = lambda k, z: single_sampler(k, h, z)
+        samples = jax.vmap(sample_fn)(keys, z_array)
+        return samples
+
+    # Perform warmup if requested and batch_size is provided
+    if warmup and batch_size is not None:
+        warmup_key = random.PRNGKey(0)
+        warmup_z = jnp.full(batch_size, 1.0, dtype=jnp.float64)
+        # Run warmup multiple times to ensure compilation is complete
+        for _ in range(3):
+            batch_sampler(warmup_key, warmup_z).block_until_ready()
+
+    return batch_sampler
+
+
 @partial(jax.jit, static_argnames=['h'])
 def sample_pg_batch(key, z_array, h=1.0):
     """
     Sample from PG(h, z) for a batch of z values using GPU acceleration.
 
-    This function is optimized for GPU and will automatically parallelize
-    across the batch dimension.
+    This function is JIT-compiled and will parallelize across the batch dimension.
+    For iterative use with changing z values, consider using create_pg_sampler()
+    instead, which provides better control over warmup and avoids recompilation.
 
     Parameters
     ----------
@@ -1183,8 +1271,18 @@ def sample_pg_batch(key, z_array, h=1.0):
     >>> key = jax.random.PRNGKey(42)
     >>> z_array = jnp.array([0.5, 1.0, 2.0, 5.0])
     >>> samples = sample_pg_batch(key, z_array)
+    >>>
+    >>> # For iterative MCMC-style usage, use create_pg_sampler instead:
+    >>> from polyagamma_jax import create_pg_sampler
+    >>> sampler = create_pg_sampler(h=1.0, batch_size=1000)
+    >>> for z_val in [0.5, 1.0, 2.0]:
+    ...     samples = sampler(key, jnp.full(1000, z_val))  # No recompilation!
+
+    See Also
+    --------
+    create_pg_sampler : Create a pre-warmed sampler for iterative use
     """
-    z_array = jnp.asarray(z_array)
+    z_array = jnp.asarray(z_array, dtype=jnp.float64)
     n = z_array.shape[0]
 
     # Split keys for each sample
