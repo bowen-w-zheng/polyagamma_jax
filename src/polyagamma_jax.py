@@ -483,7 +483,7 @@ def piecewise_coef(n, x, logx, z, k):
 
 
 @jax.jit
-def random_right_bounded_invgauss(key, z, z2, k, max_iter=1000):
+def random_right_bounded_invgauss(key, z, z2, k, max_iter=10000):
     """
     Sample from an Inverse-Gaussian(1/z, 1) truncated on {x | x < T}.
 
@@ -526,8 +526,9 @@ def random_right_bounded_invgauss(key, z, z2, k, max_iter=1000):
             x_prop = T / ((1.0 + T * e1) ** 2)
 
             # Check second condition (if z > 0)
+            # Accept if log(U) <= -0.5 * z^2 * X (equivalent to U <= exp(-0.5 * z^2 * X))
             u = random.uniform(subkey3)
-            accept2 = (z <= 0.0) | (jnp.log(1.0 - u) >= -0.5 * z2 * x_prop)
+            accept2 = (z <= 0.0) | (u <= jnp.exp(-0.5 * z2 * x_prop))
 
             accepted = accept1 & accept2
             x_new = jnp.where(accepted, x_prop, x)
@@ -572,7 +573,7 @@ def random_right_bounded_invgauss(key, z, z2, k, max_iter=1000):
 
 
 @jax.jit
-def random_jacobi_star(key, z, z2, k, proposal_probability, max_iter=1000):
+def random_jacobi_star(key, z, z2, k, proposal_probability, max_iter=10000):
     """
     Generate a random sample J*(1, z) using the Devroye method.
 
@@ -1067,6 +1068,9 @@ def sample_pg_normal_single(key, h, z):
     """
     Sample from PG(h, z) using Normal approximation (for large h > 50).
 
+    Uses truncated normal to ensure samples are always positive, as required
+    for Polya-Gamma distributions.
+
     Parameters
     ----------
     key : PRNGKey
@@ -1089,12 +1093,37 @@ def sample_pg_normal_single(key, h, z):
     def z_nonzero_case():
         x = jnp.tanh(0.5 * z)
         mean = 0.5 * h * x / z
-        stdev = jnp.sqrt(0.25 * h * (jnp.sinh(z) - z) * (1.0 - x * x) / (z * z * z))
+        # Ensure variance is non-negative (can be negative due to numerical issues)
+        variance = jnp.maximum(0.0, 0.25 * h * (jnp.sinh(z) - z) * (1.0 - x * x) / (z * z * z))
+        stdev = jnp.sqrt(variance)
         return mean, stdev
 
     mean, stdev = jax.lax.cond(z == 0.0, z_zero_case, z_nonzero_case)
 
-    return mean + random.normal(key) * stdev
+    # Sample from truncated normal to ensure positivity
+    # For large h, the distribution is concentrated around the mean,
+    # so we use rejection sampling with a safety limit
+    max_iter = 100
+
+    def cond_fn(state):
+        key, sample, accepted, iter_count = state
+        return (~accepted) & (iter_count < max_iter)
+
+    def body_fn(state):
+        key, sample, _, iter_count = state
+        key, subkey = random.split(key)
+        sample_prop = mean + random.normal(subkey) * stdev
+        accepted = sample_prop > 0.0
+        sample_new = jnp.where(accepted, sample_prop, sample)
+        return key, sample_new, accepted, iter_count + 1
+
+    _, sample_final, _, _ = jax.lax.while_loop(
+        cond_fn, body_fn, (key, 0.0, False, 0)
+    )
+
+    # If we still don't have a positive sample (very unlikely for large h),
+    # fall back to using the mean
+    return jnp.where(sample_final > 0.0, sample_final, mean)
 
 
 # ==============================================================================
