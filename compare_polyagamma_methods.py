@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import time
-from typing import Callable, Iterable, Tuple
+from typing import Iterable, Tuple
 
 import numpy as np
 
@@ -29,7 +29,6 @@ if SRC_PATH not in sys.path:
 
 # Remove local polyagamma directory from sys.path to avoid shadowing
 # the installed C-backend polyagamma package
-import sys
 if REPO_ROOT in sys.path:
     sys.path.remove(REPO_ROOT)
 
@@ -41,16 +40,7 @@ except ImportError as exc:  # pragma: no cover - optional dependency in some env
         "Install it with: pip install polyagamma"
     ) from exc
 
-from polyagamma_jax import (
-    sample_pg_devroye_single,
-    sample_pg_normal_single,
-    sample_pg_saddle_single,
-    sample_pg_batch,
-)
-
 jax.config.update("jax_enable_x64", True)
-
-SingleSampler = Callable[[jax.random.PRNGKey, float, float], jnp.ndarray]
 
 
 def _sample_c_backend(h: float, z: float, n_samples: int) -> Tuple[np.ndarray, float]:
@@ -61,90 +51,15 @@ def _sample_c_backend(h: float, z: float, n_samples: int) -> Tuple[np.ndarray, f
     return samples, elapsed
 
 
-def _create_batch_sampler(single_sampler: SingleSampler, h: float):
-    """Create a batch sampler from a single sampler function.
-
-    The returned batch sampler accepts z_array as a traced argument to avoid
-    recompilation when z values change (as long as shape and dtype remain constant).
-    h is fixed at creation time since it's used in control flow within the samplers.
-
-    Parameters
-    ----------
-    single_sampler : callable
-        Single sample function with signature (key, h, z) -> sample
-    h : float
-        Shape parameter (fixed at JIT compile time)
-
-    Returns
-    -------
-    callable
-        Batch sampler with signature (key, z_array) -> samples
-    """
-    @jax.jit
-    def batch_sampler(key: jax.random.PRNGKey, z_array: jnp.ndarray) -> jnp.ndarray:
-        """Sample from PG(h, z) for a batch of z values."""
-        n = z_array.shape[0]
-        keys = jax.random.split(key, n)
-        sample_fn = lambda k, z: single_sampler(k, h, z)
-        samples = jax.vmap(sample_fn)(keys, z_array)
-        return samples
-
-    return batch_sampler
-
-
-def _sample_jax_method(
-    single_sampler: SingleSampler,
-    h: float,
-    z: float,
-    n_samples: int,
-    seed: int,
-) -> Tuple[np.ndarray, float]:
-    """Collect ``n_samples`` draws for ``single_sampler`` and elapsed seconds.
-
-    Uses efficient batch sampling by creating an array of identical z values
-    and using vectorized sampling. The batch sampler is created once and reused
-    across warmup and timed runs to avoid recompilation.
-    """
-    # Create batch sampler for this method (only once)
-    # h is fixed at creation time, z_array is traced to avoid recompilation
-    batch_sampler = _create_batch_sampler(single_sampler, h)
-
-    # Create arrays for batch sampling
-    key = jax.random.PRNGKey(seed)
-    z_array = jnp.full(n_samples, z, dtype=jnp.float64)
-
-    # Warmup: Run multiple times to ensure JIT compilation is complete
-    warmup_size = min(500, n_samples)
-    z_warmup = z_array[:warmup_size]
-    for _ in range(3):
-        batch_sampler(key, z_warmup).block_until_ready()
-
-    # Timed sampling - run multiple iterations and take the best time
-    n_iterations = 5
-    times = []
-    all_samples = None
-    for i in range(n_iterations):
-        key_i = jax.random.PRNGKey(seed + i)
-        start = time.perf_counter()
-        samples = batch_sampler(key_i, z_array)
-        samples.block_until_ready()
-        elapsed = time.perf_counter() - start
-        times.append(elapsed)
-        if i == 0:
-            all_samples = samples
-
-    # Use the minimum time (best performance after warmup)
-    min_time = min(times)
-
-    return np.asarray(all_samples), min_time
-
-
 def compare_methods(
     h: float = 1.0,
     z_values: Iterable[float] = (0.1, 0.5, 2.0, 10.0),
     n_samples: int = 10000,
 ) -> None:
-    """Print comparison tables for each sampler defined in :mod:`polyagamma_jax`.
+    """Print comparison tables for JAX Polya-Gamma samplers vs C-backend.
+
+    This function compares the C-backend implementation (which uses its own
+    hybrid method) against individual JAX sampling methods.
 
     Parameters
     ----------
@@ -155,13 +70,14 @@ def compare_methods(
     n_samples : int, optional
         Number of samples to draw for each test (default: 10000)
     """
-    from polyagamma_jax import sample_pg_single
+    from polyagamma_jax import create_pg_sampler
 
+    # JAX methods to compare
     methods = (
-        ("devroye", sample_pg_devroye_single),
-        ("saddle", sample_pg_saddle_single),
-        ("normal", sample_pg_normal_single),
-        ("hybrid", sample_pg_single),
+        ("devroye", "devroye"),
+        ("saddle", "saddle"),
+        ("normal", "normal"),
+        ("hybrid", "hybrid"),
     )
 
     header = (
@@ -176,37 +92,32 @@ def compare_methods(
     )
 
     print("\n" + "=" * 100)
-    print(f"POLYA-GAMMA SAMPLER COMPARISON: C-backend vs JAX")
+    print(f"POLYA-GAMMA SAMPLER COMPARISON: C-backend (hybrid) vs JAX methods")
     print(f"Parameters: h={h}, n_samples={n_samples}")
     print("=" * 100)
+    print("\nNOTE: C-backend uses its own hybrid method for all comparisons.")
+    print("      JAX methods are tested individually to show their performance characteristics.")
+    print("=" * 100)
 
-    for method_name, sampler in methods:
+    for method_name, method in methods:
         print(f"\n{'=' * 100}")
-        print(f"Method: {method_name.upper()}")
+        print(f"JAX Method: {method_name.upper()}")
         print(f"{'=' * 100}")
         print(header)
         print("-" * 100)
 
-        # Create batch sampler once for this method and reuse across all z values
-        # h is fixed at creation time, only z values change (avoiding recompilation)
-        batch_sampler = _create_batch_sampler(sampler, h)
-
-        # Perform initial warmup with first z value to trigger compilation
-        first_z = list(z_values)[0]
-        warmup_key = jax.random.PRNGKey(42)
-        warmup_size = min(500, n_samples)
-        z_warmup = jnp.full(warmup_size, first_z, dtype=jnp.float64)
-        for _ in range(3):
-            batch_sampler(warmup_key, z_warmup).block_until_ready()
+        # Create pre-warmed sampler using the new API
+        # This ensures optimal performance with no recompilation when z changes
+        batch_sampler = create_pg_sampler(h=h, batch_size=n_samples, method=method, warmup=True)
 
         for idx, z in enumerate(z_values):
-            # Sample from C backend
+            # Sample from C backend (uses C's hybrid method)
             c_samples, c_elapsed = _sample_c_backend(h, z, n_samples)
             c_mean = c_samples.mean()
             c_var = c_samples.var()
             c_time_ms = c_elapsed * 1000
 
-            # Sample from JAX implementation using pre-created batch sampler
+            # Sample from JAX implementation using pre-warmed batch sampler
             z_array = jnp.full(n_samples, z, dtype=jnp.float64)
 
             # Timed sampling - run multiple iterations and take the best time
@@ -246,13 +157,15 @@ def compare_methods(
             print(row)
 
     print("\n" + "=" * 100)
-    print("Notes:")
+    print("Summary:")
+    print("=" * 100)
     print("  - 'Speedup' shows JAX speedup relative to C-backend (higher is better)")
-    print("  - JAX times represent the best of 5 runs after warmup (excludes JIT compilation)")
-    print("  - C-backend times are single-run measurements")
-    print("  - Mean and variance should be similar between C and JAX implementations")
-    print("  - Hybrid method automatically selects the best algorithm based on h and z")
-    print("  - JAX performance improves significantly with larger batch sizes (GPU acceleration)")
+    print("  - JAX times are best of 5 runs after warmup (no JIT compilation overhead)")
+    print("  - C-backend times are single-run measurements using C's hybrid method")
+    print("  - Mean and variance should be similar across implementations")
+    print("  - JAX 'hybrid' method automatically selects the best algorithm (like C does)")
+    print("  - JAX 'saddle' often shows excellent speed+accuracy balance")
+    print("  - Batch processing and GPU acceleration provide significant JAX speedups")
     print("=" * 100 + "\n")
 
 
