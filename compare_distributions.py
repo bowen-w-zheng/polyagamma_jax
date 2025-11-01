@@ -33,6 +33,7 @@ SEED = 42
 
 # Method names and functions
 # Map JAX methods to their corresponding C-backend method names
+# NOTE: Normal approximation is only valid for h > 50, so we skip it for h=1
 METHODS = {
     'Devroye': {
         'jax_func': sample_pg_devroye_single,
@@ -42,10 +43,12 @@ METHODS = {
         'jax_func': sample_pg_saddle_single,
         'c_method': 'saddle'
     },
-    'Normal': {
-        'jax_func': sample_pg_normal_single,
-        'c_method': None  # C backend doesn't expose normal method separately
-    },
+    # Normal approximation commented out because it's INVALID for h=1
+    # It produces negative values because it's only valid for h > 50
+    # 'Normal': {
+    #     'jax_func': sample_pg_normal_single,
+    #     'c_method': None
+    # },
 }
 
 
@@ -144,17 +147,7 @@ def create_comparison_plot(method_name, method_config, z_values, h, n_samples, s
         print(f"  C-backend ({c_method_str}) - Mean: {c_samples.mean():.6f}, Std: {c_samples.std():.6f}")
         print(f"  JAX ({method_name})       - Mean: {jax_samples.mean():.6f}, Std: {jax_samples.std():.6f}")
 
-    # Compute global x-range for aligned axes
-    global_min = min(np.min(c) for c in all_c_samples)
-    global_max = max(np.max(c) for c in all_c_samples)
-    global_min = min(global_min, min(np.min(j) for j in all_jax_samples))
-    global_max = max(global_max, max(np.max(j) for j in all_jax_samples))
-    margin = (global_max - global_min) * 0.05
-    x_range = (global_min - margin, global_max + margin)
-
-    print(f"\nGlobal x-range: [{x_range[0]:.4f}, {x_range[1]:.4f}]")
-
-    # Second pass: create plots with aligned x-axis
+    # Create plots with individual x-axis for each z value
     for idx, z in enumerate(z_values):
         ax = axes_flat[idx]
         c_samples = all_c_samples[idx]
@@ -166,7 +159,13 @@ def create_comparison_plot(method_name, method_config, z_values, h, n_samples, s
         jax_mean = jax_samples.mean()
         jax_std = jax_samples.std()
 
-        # Create histogram with common bins
+        # Compute individual x-range for this z value
+        x_min = min(np.min(c_samples), np.min(jax_samples))
+        x_max = max(np.max(c_samples), np.max(jax_samples))
+        margin = (x_max - x_min) * 0.05
+        x_range = (x_min - margin, x_max + margin)
+
+        # Create histogram with bins specific to this range
         bins = np.linspace(x_range[0], x_range[1], 50)
 
         c_label = f'C-backend ({c_method_str})'
@@ -175,7 +174,7 @@ def create_comparison_plot(method_name, method_config, z_values, h, n_samples, s
         ax.hist(jax_samples, bins=bins, alpha=0.5, label=f'JAX ({method_name})',
                 color='red', density=True, edgecolor='black', linewidth=0.5)
 
-        # Set common x-axis range
+        # Set individual x-axis range
         ax.set_xlim(x_range)
 
         # Add labels and title

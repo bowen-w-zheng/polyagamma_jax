@@ -1,7 +1,8 @@
 # Comparison Distribution Fixes
 
-## Issue Identified
+## Issues Identified
 
+### Issue 1: Comparing Different Methods
 The `compare_distributions.py` script was comparing **different methods** between C and JAX:
 - **C-backend**: Used `random_polyagamma(h, z)` which calls the **hybrid method** that automatically selects the best algorithm based on parameters
 - **JAX**: Used explicit methods (`sample_pg_devroye_single`, `sample_pg_saddle_single`, etc.)
@@ -11,19 +12,64 @@ For example, with `h=1.0, z=0.1`:
 - But the script compared this against JAX's Devroye, Saddle, AND Normal methods
 - This meant: C Devroye vs JAX Saddle would show different distributions (as expected, but misleading!)
 
+### Issue 2: Normal Approximation Invalid for h=1
+The Normal approximation method **produces negative values** for h=1 because:
+- Normal approximation is **only valid for h > 50** (documented in code comments)
+- For small h, it samples from a Normal distribution that can be negative
+- PG distribution is strictly positive, so negative values are invalid
+- The C backend's hybrid method **never uses Normal for h <= 50**
+
+### Issue 3: Devroye Method Producing Zeros
+The JAX Devroye implementation had **two critical bugs**:
+
+**Bug 1: Key Reuse** (polyagamma_jax.py:704-708)
+```python
+# WRONG - overwrites split key with returned key
+key, subkey = random.split(key)
+key, sample = random_jacobi_star(subkey, ...)  # Overwrites key!
+return key, result + sample
+```
+
+This caused incorrect random number generation, leading to repeated or invalid samples.
+
+**Bug 2: Insufficient max_iter** (polyagamma_jax.py:575)
+- Original: `max_iter=1000`
+- For z=0.1, acceptance rate is low enough that some samples need > 1000 iterations
+- When max_iter is exceeded, the function returns **0.0**!
+- This caused many zero values in the distribution
+
+### Issue 4: Shared X-Axis
+The comparison plots used a shared x-axis across all z values, making it hard to see the distribution shape for different parameter values.
+
 ## Fixes Applied
 
-### 1. Updated `compare_distributions.py`
+### 1. Fixed `compare_distributions.py`
 - Now explicitly specifies the C-backend method to use via the `method` parameter
 - Compares **same method to same method**:
   - JAX Devroye vs C Devroye (method="devroye")
   - JAX Saddle vs C Saddle (method="saddle")
-  - JAX Normal vs C hybrid (C doesn't expose Normal separately)
+- **Removed Normal comparison** for h=1 (invalid parameter range)
+- Removed shared x-axis - each subplot now has its own x-range
 
-### 2. Added Clear Documentation
+### 2. Fixed JAX Devroye Implementation (polyagamma_jax.py)
+
+**Fix 1: Correct Key Handling**
+```python
+# CORRECT - properly thread keys through the loop
+new_key, subkey = random.split(key)
+_, sample = random_jacobi_star(subkey, ...)  # Discard returned key
+return new_key, result + sample  # Use split key for next iteration
+```
+
+**Fix 2: Increased max_iter**
+- Changed from `max_iter=1000` to `max_iter=10000`
+- Ensures enough iterations for low acceptance rates (like z=0.1)
+- Prevents returning zero values
+
+### 3. Added Clear Documentation
 - Updated docstrings and print statements to clarify what's being compared
 - Plot titles now show which C method is being used
-- Added notes in the output about the comparison methodology
+- Added comments explaining why Normal is skipped for h=1
 
 ## Devroye Implementation Comparison
 

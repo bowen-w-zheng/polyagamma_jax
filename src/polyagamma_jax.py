@@ -572,7 +572,7 @@ def random_right_bounded_invgauss(key, z, z2, k, max_iter=1000):
 
 
 @jax.jit
-def random_jacobi_star(key, z, z2, k, proposal_probability, max_iter=1000):
+def random_jacobi_star(key, z, z2, k, proposal_probability, max_iter=10000):
     """
     Generate a random sample J*(1, z) using the Devroye method.
 
@@ -703,9 +703,10 @@ def sample_pg_devroye_single(key, h, z):
 
     def body_fn(i, carry):
         key, result = carry
-        key, subkey = random.split(key)
-        key, sample = random_jacobi_star(subkey, z_half, z2, k, proposal_probability)
-        return key, result + sample
+        # Split key properly: use new key for next iteration, subkey for sampling
+        new_key, subkey = random.split(key)
+        _, sample = random_jacobi_star(subkey, z_half, z2, k, proposal_probability)
+        return new_key, result + sample
 
     _, result = jax.lax.fori_loop(0, h_int, body_fn, (key, 0.0))
 
