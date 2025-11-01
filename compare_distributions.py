@@ -2,9 +2,11 @@
 Compare distributions obtained by different sampling methods.
 
 This script compares the three JAX sampling methods (Devroye, Saddle, Normal)
-against the C-backend implementation across different z values with h=1.
+against the SAME method from the C-backend implementation across different z
+values with h=1.
 
 Creates 3 plots (one per method), each with subplots for different z values.
+Each plot compares the JAX method against the C-backend using the SAME method.
 """
 
 import sys
@@ -30,17 +32,39 @@ Z_VALUES = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
 SEED = 42
 
 # Method names and functions
+# Map JAX methods to their corresponding C-backend method names
 METHODS = {
-    'Devroye': sample_pg_devroye_single,
-    'Saddle': sample_pg_saddle_single,
-    'Normal': sample_pg_normal_single,
+    'Devroye': {
+        'jax_func': sample_pg_devroye_single,
+        'c_method': 'devroye'
+    },
+    'Saddle': {
+        'jax_func': sample_pg_saddle_single,
+        'c_method': 'saddle'
+    },
+    'Normal': {
+        'jax_func': sample_pg_normal_single,
+        'c_method': None  # C backend doesn't expose normal method separately
+    },
 }
 
 
-def sample_c_backend(h, z, n_samples):
-    """Sample using C-backend implementation."""
-    print(f"  C-backend sampling...")
-    return np.array([random_polyagamma(h, z) for _ in range(n_samples)])
+def sample_c_backend(h, z, n_samples, method=None):
+    """Sample using C-backend implementation with specified method.
+
+    Parameters
+    ----------
+    h : float
+        Shape parameter
+    z : float
+        Exponential tilting parameter
+    n_samples : int
+        Number of samples
+    method : str or None
+        C-backend method to use. If None, uses the default hybrid method.
+    """
+    print(f"  C-backend sampling (method={method})...")
+    return np.array([random_polyagamma(h, z, method=method) for _ in range(n_samples)])
 
 
 def sample_jax_method_batch(key, h, z, n_samples, method_func):
@@ -59,14 +83,34 @@ def sample_jax_method_batch(key, h, z, n_samples, method_func):
     return np.array(samples)
 
 
-def create_comparison_plot(method_name, method_func, z_values, h, n_samples, seed):
-    """Create comparison plot for a specific method across different z values."""
+def create_comparison_plot(method_name, method_config, z_values, h, n_samples, seed):
+    """Create comparison plot for a specific method across different z values.
+
+    Parameters
+    ----------
+    method_name : str
+        Name of the method (e.g., 'Devroye', 'Saddle', 'Normal')
+    method_config : dict
+        Dictionary with 'jax_func' and 'c_method' keys
+    z_values : list
+        List of z values to test
+    h : float
+        Shape parameter
+    n_samples : int
+        Number of samples per test
+    seed : int
+        Random seed
+    """
+    method_func = method_config['jax_func']
+    c_method = method_config['c_method']
+
     n_z = len(z_values)
     n_cols = 3
     n_rows = (n_z + n_cols - 1) // n_cols  # Ceiling division
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5 * n_rows))
-    fig.suptitle(f'{method_name} Method: C-backend vs JAX (h={h})',
+    c_method_str = c_method if c_method else "hybrid (Normal)"
+    fig.suptitle(f'{method_name} Method: C-backend ({c_method_str}) vs JAX (h={h})',
                  fontsize=16, fontweight='bold')
 
     # Flatten axes for easier indexing
@@ -80,6 +124,7 @@ def create_comparison_plot(method_name, method_func, z_values, h, n_samples, see
 
     print(f"\n{'='*60}")
     print(f"Sampling for {method_name} Method (h={h})")
+    print(f"C-backend method: {c_method_str}, JAX method: {method_name}")
     print(f"{'='*60}")
 
     key = jax.random.PRNGKey(seed)
@@ -87,8 +132,8 @@ def create_comparison_plot(method_name, method_func, z_values, h, n_samples, see
     for z in z_values:
         print(f"\nSampling for z={z}...")
 
-        # Sample from C-backend
-        c_samples = sample_c_backend(h, z, n_samples)
+        # Sample from C-backend using the same method
+        c_samples = sample_c_backend(h, z, n_samples, method=c_method)
         all_c_samples.append(c_samples)
 
         # Sample from JAX method
@@ -96,8 +141,8 @@ def create_comparison_plot(method_name, method_func, z_values, h, n_samples, see
         jax_samples = sample_jax_method_batch(subkey, h, z, n_samples, method_func)
         all_jax_samples.append(jax_samples)
 
-        print(f"  C-backend   - Mean: {c_samples.mean():.6f}, Std: {c_samples.std():.6f}")
-        print(f"  JAX ({method_name}) - Mean: {jax_samples.mean():.6f}, Std: {jax_samples.std():.6f}")
+        print(f"  C-backend ({c_method_str}) - Mean: {c_samples.mean():.6f}, Std: {c_samples.std():.6f}")
+        print(f"  JAX ({method_name})       - Mean: {jax_samples.mean():.6f}, Std: {jax_samples.std():.6f}")
 
     # Compute global x-range for aligned axes
     global_min = min(np.min(c) for c in all_c_samples)
@@ -124,7 +169,8 @@ def create_comparison_plot(method_name, method_func, z_values, h, n_samples, see
         # Create histogram with common bins
         bins = np.linspace(x_range[0], x_range[1], 50)
 
-        ax.hist(c_samples, bins=bins, alpha=0.5, label='C-backend',
+        c_label = f'C-backend ({c_method_str})'
+        ax.hist(c_samples, bins=bins, alpha=0.5, label=c_label,
                 color='blue', density=True, edgecolor='black', linewidth=0.5)
         ax.hist(jax_samples, bins=bins, alpha=0.5, label=f'JAX ({method_name})',
                 color='red', density=True, edgecolor='black', linewidth=0.5)
@@ -154,16 +200,17 @@ def main():
     """Main function to create all comparison plots."""
     print(f"\n{'#'*60}")
     print(f"# Distribution Comparison: C-backend vs JAX Methods")
+    print(f"# IMPORTANT: Each comparison uses the SAME method in both backends!")
     print(f"# h = {H_VALUE}, n_samples = {N_SAMPLES}")
     print(f"# z values: {Z_VALUES}")
     print(f"{'#'*60}")
 
     # Create comparison plot for each method
     figures = {}
-    for method_name, method_func in METHODS.items():
+    for method_name, method_config in METHODS.items():
         fig = create_comparison_plot(
             method_name,
-            method_func,
+            method_config,
             Z_VALUES,
             H_VALUE,
             N_SAMPLES,
@@ -178,6 +225,8 @@ def main():
 
     print(f"\n{'#'*60}")
     print(f"# All plots saved successfully!")
+    print(f"# Note: Devroye and Saddle compare same methods across backends")
+    print(f"# Normal uses JAX Normal vs C hybrid (C doesn't expose Normal separately)")
     print(f"{'#'*60}\n")
 
     # Note: plt.show() is commented out since we're in a non-interactive environment
