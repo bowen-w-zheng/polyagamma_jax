@@ -13,7 +13,7 @@ jax.config.update("jax_enable_x64", True)
 # JAX Polya-Gamma sampler
 _HAS_PG = False
 try:
-    from polyagamma_jax import sample_pg_improved
+    from polyagamma_jax import sample_pg_single
     _HAS_PG = True
 except Exception:
     _HAS_PG = False
@@ -159,7 +159,7 @@ def sample_omega_pg(key: jax.random.PRNGKey, psi: jnp.ndarray,
     psi_flat = psi.ravel()
 
     # Sample using vectorized PG sampler: ω ~ PG(1, ψ)
-    omega_flat = vmap(lambda k, z: sample_pg_improved(k, h=1.0, z=z))(keys, psi_flat)
+    omega_flat = vmap(lambda k, z: sample_pg_single(k, 1.0, z))(keys, psi_flat)
 
     # Reshape back to (S, N)
     omega = omega_flat.reshape(S, N)
