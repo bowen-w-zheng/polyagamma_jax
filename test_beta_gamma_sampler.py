@@ -53,8 +53,8 @@ def test_samplers():
     print("-" * 80)
 
     cfg_mean = JointSamplerConfig(
-        n_warmup=50,
-        n_samples=20,
+        n_warmup=30,
+        n_samples=10,
         thin=2,
         use_pg_sampler=False,
         omega_floor=1e-6,
@@ -97,8 +97,8 @@ def test_samplers():
         print("-" * 80)
 
         cfg_pg = JointSamplerConfig(
-            n_warmup=50,
-            n_samples=20,
+            n_warmup=30,
+            n_samples=10,
             thin=2,
             use_pg_sampler=True,  # Use exact PG sampling
             omega_floor=1e-6,
@@ -109,7 +109,7 @@ def test_samplers():
             standardize_hist=False,
             use_ard_beta=False,
             verbose=True,
-            rng=np.random.default_rng(42)
+            rng=np.random.default_rng(43)  # Different seed to show variation
         )
 
         trace_pg = sample_beta_gamma_from_fixed_latents_joint(

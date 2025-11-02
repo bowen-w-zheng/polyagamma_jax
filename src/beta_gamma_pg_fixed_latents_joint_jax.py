@@ -287,7 +287,9 @@ def update_ard_tau2(key: jax.random.PRNGKey, beta: jnp.ndarray,
 
 @partial(jit, static_argnames=['d', 'p', 'R_h', 'use_ard', 'use_pg'])
 def gibbs_iteration(
-    carry: Tuple,
+    beta: jnp.ndarray,
+    gamma: jnp.ndarray,
+    Prec_beta_all: jnp.ndarray,
     key: jax.random.PRNGKey,
     X: jnp.ndarray,
     H_all: jnp.ndarray,
@@ -303,12 +305,11 @@ def gibbs_iteration(
     R_h: int,
     use_ard: bool,
     use_pg: bool,
-) -> Tuple:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Single Gibbs iteration (fully JIT-compiled).
+    Returns: (beta_new, gamma_new, Prec_beta_all_new)
     """
-    beta, gamma, Prec_beta_all = carry
-
     # Compute ψ
     psi = compute_psi_vectorized(X, H_all, beta, gamma)
 
@@ -342,8 +343,8 @@ def gibbs_iteration(
     keys = jax.random.split(key_theta, S)
     theta = sample_theta_all_units(keys, A, b, d)
 
-    beta = theta[:, :p]
-    gamma = theta[:, p:] if R_h > 0 else gamma
+    beta_new = theta[:, :p]
+    gamma_new = theta[:, p:] if R_h > 0 else gamma
 
     # ARD update (conditional)
     def do_ard_update(key_beta_prec):
@@ -356,14 +357,14 @@ def gibbs_iteration(
         return key_beta_prec[2]
 
     key_ard, _ = jax.random.split(key_rest)
-    Prec_beta_all = lax.cond(
+    Prec_beta_all_new = lax.cond(
         use_ard,
         do_ard_update,
         skip_ard_update,
-        (key_ard, beta, Prec_beta_all)
+        (key_ard, beta_new, Prec_beta_all)
     )
 
-    return (beta, gamma, Prec_beta_all), (beta, gamma)
+    return beta_new, gamma_new, Prec_beta_all_new
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -504,14 +505,13 @@ def sample_beta_gamma_from_fixed_latents_joint(
         print("[JAX sampler] Starting Gibbs sampling...")
         print(f"[JAX sampler] Warmup: {cfg.n_warmup}, Samples: {cfg.n_samples}, Thin: {cfg.thin}")
 
-    # ----- Sampling with lax.scan (fully compiled) -----
+    # ----- Sampling loop with progress monitoring -----
     total = int(cfg.n_warmup + cfg.n_samples * cfg.thin)
     d = p + R_h
 
     key = jax.random.PRNGKey(cfg.rng.integers(0, 2**31))
-    keys = jax.random.split(key, total)
 
-    # Partial application for fixed arguments
+    # Partial application for fixed arguments (compiles once on first call)
     gibbs_fn = partial(
         gibbs_iteration,
         X=X_jax,
@@ -530,17 +530,32 @@ def sample_beta_gamma_from_fixed_latents_joint(
         use_pg=cfg.use_pg_sampler,
     )
 
-    # Run all iterations with lax.scan
-    init_carry = (beta, gamma, Prec_beta_all)
-    final_carry, (beta_trace, gamma_trace) = lax.scan(gibbs_fn, init_carry, keys)
+    # Pre-allocate storage for posterior samples
+    beta_draws = []
+    gamma_draws = [] if R_h > 0 else None
 
-    if cfg.verbose:
-        print("[JAX sampler] Sampling complete. Extracting posterior samples...")
+    # Run iterations with progress monitoring
+    for i in range(total):
+        key, subkey = jax.random.split(key)
 
-    # Extract samples (after warmup, with thinning)
-    indices = jnp.arange(cfg.n_warmup, total, cfg.thin)
-    beta_draws = np.array(beta_trace[indices], dtype=np.float32)
-    gamma_draws = None if R_h == 0 else np.array(gamma_trace[indices], dtype=np.float32)
+        # Progress monitoring every 10 iterations
+        if cfg.verbose and (i + 1) % 10 == 0:
+            phase = "Warmup" if i < cfg.n_warmup else "Sampling"
+            iter_in_phase = i + 1 if i < cfg.n_warmup else i + 1 - cfg.n_warmup
+            print(f"[JAX sampler] {phase} iteration {iter_in_phase}/{cfg.n_warmup if i < cfg.n_warmup else cfg.n_samples * cfg.thin}")
+
+        # Single Gibbs iteration (JIT-compiled, reuses compilation after first call)
+        beta, gamma, Prec_beta_all = gibbs_fn(beta, gamma, Prec_beta_all, subkey)
+
+        # Store samples after warmup, with thinning
+        if i >= cfg.n_warmup and (i - cfg.n_warmup) % cfg.thin == 0:
+            beta_draws.append(np.array(beta, dtype=np.float32))
+            if R_h > 0:
+                gamma_draws.append(np.array(gamma, dtype=np.float32))
+
+    # Convert lists to arrays
+    beta_draws = np.array(beta_draws)
+    gamma_draws = None if R_h == 0 else np.array(gamma_draws)
 
     if cfg.verbose:
         print(f"[JAX sampler] Returned {beta_draws.shape[0]} posterior samples")
