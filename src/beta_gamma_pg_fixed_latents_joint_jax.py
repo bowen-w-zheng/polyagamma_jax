@@ -77,6 +77,8 @@ class JointSamplerConfig:
     n_samples: int = 1000
     thin: int = 1
     use_pg_sampler: bool = False  # Default to False (use mean approximation)
+    # WARNING: use_pg_sampler=False uses E[ω|ψ] (deterministic), NOT true MCMC sampling!
+    # For exact Bayesian inference, set use_pg_sampler=True (requires polyagamma_jax).
     omega_floor: float = 1e-6
 
     tau2_intercept: float = 100.0**2
@@ -89,7 +91,7 @@ class JointSamplerConfig:
     Sigma_gamma: Optional[np.ndarray] = None
     tau2_gamma: float = 25.0**2
 
-    standardize_reim: bool = False
+    standardize_reim: bool = False  # WARNING: True breaks PLV/phase interpretation!
     standardize_hist: bool = False
 
     rng: np.random.Generator = np.random.default_rng(0)
@@ -285,7 +287,7 @@ def update_ard_tau2(key: jax.random.PRNGKey, beta: jnp.ndarray,
     return tau2
 
 
-@partial(jit, static_argnames=['d', 'p', 'R_h', 'use_ard', 'use_pg'])
+@partial(jit, static_argnames=['d', 'p', 'R_h', 'S', 'use_ard', 'use_pg'])
 def gibbs_iteration(
     beta: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -303,11 +305,16 @@ def gibbs_iteration(
     d: int,
     p: int,
     R_h: int,
+    S: int,
     use_ard: bool,
     use_pg: bool,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Single Gibbs iteration (fully JIT-compiled).
+
+    NOTE: If use_ard=True, implements PER-UNIT ARD where each unit s and feature j
+    gets its own variance τ²_{s,j}. This is NOT shared across units.
+
     Returns: (beta_new, gamma_new, Prec_beta_all_new)
     """
     # Compute ψ
@@ -337,8 +344,7 @@ def gibbs_iteration(
         Prec_beta_all, Prec_gamma, mu_gamma
     )
 
-    # Sample θ for all units
-    S = beta.shape[0]
+    # Sample θ for all units (S is a static arg, no shape extraction needed)
     key_theta, key_rest = jax.random.split(key_rest)
     keys = jax.random.split(key_theta, S)
     theta = sample_theta_all_units(keys, A, b, d)
@@ -467,10 +473,8 @@ def sample_beta_gamma_from_fixed_latents_joint(
     Prec_beta_base[0] = 1.0 / max(cfg.tau2_intercept, 1e-12)
     Prec_beta_base[1:] = 1.0 / max(cfg.tau2_beta, 1e-12)
 
-    if cfg.use_ard_beta:
-        Prec_beta_all = jnp.broadcast_to(Prec_beta_base, (S, p))
-    else:
-        Prec_beta_all = jnp.broadcast_to(Prec_beta_base, (S, p))
+    # Initialize precision matrix (same for ARD and non-ARD; ARD updates happen in gibbs_iteration)
+    Prec_beta_all = jnp.broadcast_to(Prec_beta_base, (S, p))
 
     # Gamma prior
     if R_h > 0 and cfg.Sigma_gamma is not None:
@@ -526,6 +530,7 @@ def sample_beta_gamma_from_fixed_latents_joint(
         d=d,
         p=p,
         R_h=R_h,
+        S=S,
         use_ard=cfg.use_ard_beta,
         use_pg=cfg.use_pg_sampler,
     )
